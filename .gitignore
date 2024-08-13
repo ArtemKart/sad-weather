@@ -1,3 +1,5 @@
 /.venv/
 /.env
 /.idea/
+/config.ini
+/sad_weather/airflow/logs/

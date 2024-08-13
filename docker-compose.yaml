@@ -7,24 +7,50 @@ x-airflow-common:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://airflow:airflow@postgres/airflow
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CORE__FERNET_KEY: ''
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/sad_weather/airflow/logs
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/sad_weather/airflow/dags
   volumes:
-    - ${AIRFLOW_PROJ_DIR:-.}/airflow/dags:/opt/airflow/dags
-    - ${AIRFLOW_PROJ_DIR:-.}/airflow/logs:/opt/airflow/logs
-    - ${AIRFLOW_PROJ_DIR:-.}/airflow/plugins:/opt/airflow/plugins
-    - ${AIRFLOW_PROJ_DIR:-.}/airflow/config:/opt/airflow/config
+    - ./sad_weather:/opt/sad_weather/
+
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
+    redis:
+      condition: service_healthy
     postgres:
       condition: service_healthy
+  networks:
+    - airflow_network
 
 services:
+  postgres_weater:
+    image: postgres:16.3-alpine
+    restart: unless-stopped
+    container_name: weather_container
+    environment:
+      - POSTGRES_HOST_AUTH_METHOD=md5
+      - POSTGRES_PASSWORD=${PGPASSWORD}
+      - POSTGRES_USER=${PGUSER}
+      - POSTGRES_DB=${PGNAME}
+      - POSTGRES_HOST=${PGHOST}
+    command: postgres --listen_addresses=*
+    ports:
+      - "${PGPORT}:${PGPORT}"
+    env_file:
+      - .env
+    volumes:
+      - db-data:/var/lib/postgresql/data/
+    networks:
+      - airflow_network
+
   postgres:
     image: postgres:13
     environment:
@@ -39,6 +65,22 @@ services:
       retries: 5
       start_period: 5s
     restart: always
+    networks:
+      - airflow_network
+
+  redis:
+    image: redis:7.2-bookworm
+    expose:
+      - 6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 30s
+      retries: 50
+      start_period: 30s
+    restart: always
+    networks:
+      - airflow_network
 
   airflow-webserver:
     <<: *airflow-common
@@ -56,6 +98,8 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+    networks:
+      - airflow_network
 
   airflow-scheduler:
     <<: *airflow-common
@@ -71,6 +115,8 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+    networks:
+      - airflow_network
 
   airflow-triggerer:
     <<: *airflow-common
@@ -86,6 +132,8 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+    networks:
+      - airflow_network
 
   airflow-init:
     <<: *airflow-common
@@ -94,7 +142,6 @@ services:
     command:
       - -c
       - |
-        
         if [[ -z "${AIRFLOW_UID}" ]]; then
           export AIRFLOW_UID=1000
           echo ${AIRFLOW_UID}
@@ -139,9 +186,8 @@ services:
           echo "   https://airflow.apache.org/docs/apache-airflow/stable/howto/docker-compose/index.html#before-you-begin"
           echo
         fi
-        mkdir -p /sources/airflow/logs /sources/airflow/dags /sources/airflow/plugins /sources/airflow/config
-      
-        chown -R "${AIRFLOW_UID}:0" /sources/airflow/logs /sources/airflow/dags /sources/airflow/plugins /sources/airflow/config
+        mkdir -p /sources/sad_weather/airflow/logs /sources/sad_weather/airflow/dags /sources/sad_weather/airflow/plugins /sources/sad_weather/airflow/config
+        chown -R "${AIRFLOW_UID}:0" /sources/sad_weather/airflow/logs /sources/sad_weather/airflow/dags /sources/sad_weather/airflow/plugins /sources/sad_weather/airflow/config
         exec /entrypoint airflow version
     # yamllint enable rule:line-length
     environment:
@@ -153,7 +199,9 @@ services:
       _PIP_ADDITIONAL_REQUIREMENTS: ''
     user: "0:0"
     volumes:
-      - ${AIRFLOW_PROJ_DIR:-.}:/sources
+      - ${AIRFLOW_PROJ_DIR:-.}:/sources/sad_weather/
+    networks:
+      - airflow_network
 
   airflow-cli:
     <<: *airflow-common
@@ -162,11 +210,16 @@ services:
     environment:
       <<: *airflow-common-env
       CONNECTION_CHECK_MAX_COUNT: "0"
-    # Workaround for entrypoint issue. See: https://github.com/apache/airflow/issues/16252
     command:
       - bash
       - -c
       - airflow
-
+    networks:
+      - airflow_network
 volumes:
   postgres-db-volume:
+  db-data:
+
+networks:
+  airflow_network:
+    driver: bridge
